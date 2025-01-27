@@ -23,7 +23,11 @@
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -96,7 +100,11 @@ exports.getConfig = getConfig;
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -134,7 +142,7 @@ var __rest = (this && this.__rest) || function (s, e) {
     return t;
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.deleteSecretForRepo = exports.setSecretForRepo = exports.getPublicKey = exports.filterReposByPatterns = exports.listAllReposForAuthenticatedUser = exports.listAllMatchingRepos = exports.getRepos = exports.DefaultOctokit = exports.publicKeyCache = exports.AuditLog = void 0;
+exports.deleteSecretForRepo = exports.setSecretForRepo = exports.getPublicKey = exports.filterReposByPatterns = exports.listAllReposAccessibleToInstallation = exports.listAllReposForAuthenticatedUser = exports.listAllMatchingRepos = exports.getRepos = exports.DefaultOctokit = exports.publicKeyCache = exports.AuditLog = void 0;
 const core = __importStar(__nccwpck_require__(2186));
 const rest_1 = __nccwpck_require__(5375);
 const utils_1 = __nccwpck_require__(918);
@@ -201,29 +209,35 @@ function getRepos({ patterns, octokit, }) {
     });
 }
 exports.getRepos = getRepos;
-function listAllMatchingRepos({ patterns, octokit, affiliation = "owner,collaborator,organization_member", pageSize = 30, }) {
+function listAllMatchingRepos({ patterns, octokit, affiliation = "owner,collaborator,organization_member", per_page = 30, }) {
     return __awaiter(this, void 0, void 0, function* () {
-        const repos = yield listAllReposForAuthenticatedUser({
-            octokit,
-            affiliation,
-            pageSize,
-        });
+        const usingInstallToken = (0, config_1.getConfig)().GITHUB_TOKEN.startsWith("ghs_");
+        const repos = yield (usingInstallToken
+            ? listAllReposAccessibleToInstallation({
+                octokit,
+                per_page,
+            })
+            : listAllReposForAuthenticatedUser({
+                octokit,
+                affiliation,
+                per_page,
+            }));
         core.info(`Available repositories: ${JSON.stringify(repos.map((r) => r.full_name))}`);
         return filterReposByPatterns(repos, patterns);
     });
 }
 exports.listAllMatchingRepos = listAllMatchingRepos;
-function listAllReposForAuthenticatedUser({ octokit, affiliation, pageSize, }) {
+function listAllReposForAuthenticatedUser({ octokit, affiliation, per_page, }) {
     return __awaiter(this, void 0, void 0, function* () {
         const repos = [];
         for (let page = 1;; page++) {
             const response = yield octokit.repos.listForAuthenticatedUser({
                 affiliation,
                 page,
-                pageSize,
+                per_page,
             });
             repos.push(...response.data);
-            if (response.data.length < pageSize) {
+            if (response.data.length < per_page) {
                 break;
             }
         }
@@ -231,6 +245,23 @@ function listAllReposForAuthenticatedUser({ octokit, affiliation, pageSize, }) {
     });
 }
 exports.listAllReposForAuthenticatedUser = listAllReposForAuthenticatedUser;
+function listAllReposAccessibleToInstallation({ octokit, per_page, }) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const repos = [];
+        for (let page = 1;; page++) {
+            const response = yield octokit.apps.listReposAccessibleToInstallation({
+                page,
+                per_page,
+            });
+            repos.push(...response.data.repositories);
+            if (response.data.repositories.length < per_page) {
+                break;
+            }
+        }
+        return repos.filter((r) => !r.archived);
+    });
+}
+exports.listAllReposAccessibleToInstallation = listAllReposAccessibleToInstallation;
 function filterReposByPatterns(repos, patterns) {
     const regexPatterns = patterns.map((s) => new RegExp(s));
     return repos.filter((repo) => regexPatterns.filter((r) => r.test(repo.full_name)).length);
@@ -251,6 +282,13 @@ function getPublicKey(octokit, repo, environment, target) {
             else {
                 const [owner, name] = repo.full_name.split("/");
                 switch (target) {
+                    case "codespaces":
+                        publicKey = (yield octokit.codespaces.getRepoPublicKey({
+                            owner,
+                            repo: name,
+                        })).data;
+                        exports.publicKeyCache.set(repo, publicKey);
+                        return publicKey;
                     case "dependabot":
                         publicKey = (yield octokit.dependabot.getRepoPublicKey({
                             owner,
@@ -281,6 +319,14 @@ function setSecretForRepo(octokit, name, secret, repo, environment, dry_run, tar
         core.info(`Set \`${name} = ***\` (${target}) on ${repo.full_name}`);
         if (!dry_run) {
             switch (target) {
+                case "codespaces":
+                    return octokit.codespaces.createOrUpdateRepoSecret({
+                        owner: repo_owner,
+                        repo: repo_name,
+                        secret_name: name,
+                        key_id: publicKey.key_id,
+                        encrypted_value,
+                    });
                 case "dependabot":
                     yield octokit.dependabot.createOrUpdateRepoSecret({
                         owner: repo_owner,
@@ -333,6 +379,8 @@ function deleteSecretForRepo(octokit, name, secret, repo, environment, dry_run, 
             if (!dry_run) {
                 const action = "DELETE";
                 switch (target) {
+                    case "codespaces":
+                        return octokit.request(`${action} /repos/${repo.full_name}/codespaces/secrets/${name}`);
                     case "dependabot":
                         yield octokit.request(`${action} /repos/${repo.full_name}/dependabot/secrets/${name}`);
                         break;
@@ -388,7 +436,11 @@ exports.deleteSecretForRepo = deleteSecretForRepo;
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -434,7 +486,7 @@ function run() {
                 core.setFailed(`Secrets: no matches with "${config.SECRETS.join(", ")}"`);
                 return;
             }
-            const allowedTargets = ["dependabot", "actions"];
+            const allowedTargets = ["dependabot", "actions", "codespaces"];
             if (!allowedTargets.some((x) => x === config.TARGET)) {
                 core.setFailed(`Target: Value not in supported targets: ${allowedTargets}`);
                 return;
@@ -521,7 +573,11 @@ exports.run = run;
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -590,7 +646,11 @@ exports.getSecrets = getSecrets;
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];

@@ -131,18 +131,24 @@ export async function listAllMatchingRepos({
   patterns,
   octokit,
   affiliation = "owner,collaborator,organization_member",
-  pageSize = 30,
+  per_page = 30,
 }: {
   patterns: string[];
   octokit: any;
   affiliation?: string;
-  pageSize?: number;
+  per_page?: number;
 }): Promise<Repository[]> {
-  const repos = await listAllReposForAuthenticatedUser({
-    octokit,
-    affiliation,
-    pageSize,
-  });
+  const usingInstallToken = getConfig().GITHUB_TOKEN.startsWith("ghs_");
+  const repos = await (usingInstallToken
+    ? listAllReposAccessibleToInstallation({
+        octokit,
+        per_page,
+      })
+    : listAllReposForAuthenticatedUser({
+        octokit,
+        affiliation,
+        per_page,
+      }));
 
   core.info(
     `Available repositories: ${JSON.stringify(repos.map((r) => r.full_name))}`
@@ -154,11 +160,11 @@ export async function listAllMatchingRepos({
 export async function listAllReposForAuthenticatedUser({
   octokit,
   affiliation,
-  pageSize,
+  per_page,
 }: {
   octokit: any;
   affiliation: string;
-  pageSize: number;
+  per_page: number;
 }): Promise<Repository[]> {
   const repos: Repository[] = [];
 
@@ -166,11 +172,34 @@ export async function listAllReposForAuthenticatedUser({
     const response = await octokit.repos.listForAuthenticatedUser({
       affiliation,
       page,
-      pageSize,
+      per_page,
     });
     repos.push(...response.data);
 
-    if (response.data.length < pageSize) {
+    if (response.data.length < per_page) {
+      break;
+    }
+  }
+  return repos.filter((r) => !r.archived);
+}
+
+export async function listAllReposAccessibleToInstallation({
+  octokit,
+  per_page,
+}: {
+  octokit: any;
+  per_page: number;
+}): Promise<Repository[]> {
+  const repos: Repository[] = [];
+
+  for (let page = 1; ; page++) {
+    const response = await octokit.apps.listReposAccessibleToInstallation({
+      page,
+      per_page,
+    });
+    repos.push(...response.data.repositories);
+
+    if (response.data.repositories.length < per_page) {
       break;
     }
   }
@@ -212,6 +241,17 @@ export async function getPublicKey(
       const [owner, name] = repo.full_name.split("/");
 
       switch (target) {
+        case "codespaces":
+          publicKey = (
+            await octokit.codespaces.getRepoPublicKey({
+              owner,
+              repo: name,
+            })
+          ).data as PublicKey;
+
+          publicKeyCache.set(repo, publicKey);
+
+          return publicKey;
         case "dependabot":
           publicKey = (
             await octokit.dependabot.getRepoPublicKey({
@@ -261,6 +301,14 @@ export async function setSecretForRepo(
 
   if (!dry_run) {
     switch (target) {
+      case "codespaces":
+        return octokit.codespaces.createOrUpdateRepoSecret({
+          owner: repo_owner,
+          repo: repo_name,
+          secret_name: name,
+          key_id: publicKey.key_id,
+          encrypted_value,
+        });
       case "dependabot":
         await octokit.dependabot.createOrUpdateRepoSecret({
           owner: repo_owner,
@@ -322,6 +370,10 @@ export async function deleteSecretForRepo(
     if (!dry_run) {
       const action = "DELETE";
       switch (target) {
+        case "codespaces":
+          return octokit.request(
+            `${action} /repos/${repo.full_name}/codespaces/secrets/${name}`
+          );
         case "dependabot":
           await octokit.request(
             `${action} /repos/${repo.full_name}/dependabot/secrets/${name}`
