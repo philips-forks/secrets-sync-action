@@ -1,3 +1,9 @@
+> [!NOTE]
+> 
+> Usage of this action is discouraged; please use other means of secret management.
+> This repository is archived per September 2026, and will be removed per December 2026,
+> or on the earliest possible occasion when no clients depend on it anymore.
+
 # Secrets Sync Action
 
 ![Build](https://github.com/jpoehnelt/secrets-sync-action/workflows/Build/badge.svg)
